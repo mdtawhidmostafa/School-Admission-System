@@ -1,700 +1,470 @@
 # School Admission System
 
-A containerized school admission management application built with
-**ASP.NET Core (.NET 10), PostgreSQL 16, React, TypeScript, Nginx, and
-Docker Compose**.
+**A Dockerized, concurrency-aware school admission application** built with ASP.NET Core, PostgreSQL, React, and Nginx.
 
-The application manages admission classes and student seat reservations.
-It supports temporary holds, admission confirmation, cancellation,
-automatic hold expiry, and concurrent seat-allocation protection.
+> **Project type:** Assistant Software Engineer take-home assignment  
+> **Implementation:** .NET 10 · PostgreSQL 16 · React 18 · TypeScript · Vite · Nginx · Docker Compose  
+> **Status:** Local development / assignment demonstration. Not certified for production deployment.
 
-> **Project status:** This README documents the repository configuration
-> and the local checks that can be run. A successful build or test must
-> be verified on the machine where the project is executed;
-> configuration alone is not proof of production readiness.
+## Overview
 
-## Contents
+The School Admission System allows a school administrator to configure admission classes and parents or guardians to reserve seats on a first-come, first-served basis. Each class/shift has a fixed capacity. An application initially reserves a seat for a limited period; confirming the simulated payment finalizes admission, while cancellation or expiry releases the seat.
 
--   [Features](#features)
--   [Technology stack](#technology-stack)
--   [Architecture](#architecture)
--   [Prerequisites](#prerequisites)
--   [Local setup](#local-setup)
--   [Accessing the application](#accessing-the-application)
--   [Database access](#database-access)
--   [API reference](#api-reference)
--   [Admission workflow](#admission-workflow)
--   [Rate limiting and load
-    balancing](#rate-limiting-and-load-balancing)
--   [Testing and verification](#testing-and-verification)
--   [Docker commands](#docker-commands)
--   [Configuration](#configuration)
--   [Security notes](#security-notes)
--   [Troubleshooting](#troubleshooting)
--   [Project structure](#project-structure)
+Seat allocation is coordinated in PostgreSQL so concurrent requests against multiple API instances share a single source of truth. **No overselling is the intended invariant; strict network-arrival ordering is not guaranteed.**
 
-## Features
+### Key capabilities
 
--   Create and list admission classes.
--   View class capacity, held seats, confirmed seats, and available
-    seats.
--   Temporarily hold a seat for a student.
--   Confirm or cancel a hold.
--   Automatically expire temporary holds.
--   Prevent seat overselling with PostgreSQL transactions and row-level
-    locking.
--   Run three stateless API replicas behind an Nginx reverse proxy/load
-    balancer.
--   Apply request rate limits to admission mutations.
--   Return structured API errors and request IDs.
--   Persist PostgreSQL data in a named Docker volume.
--   Optionally protect class creation with an administrator API key.
+- Create class/shift offerings and view total, held, confirmed, and available seats.
+- Place a time-limited seat hold using a 17-digit student birth-registration identifier.
+- Confirm simulated admission payment or cancel an active hold.
+- Expire unconfirmed holds and return their seats to availability.
+- View a student's holds and their statuses, including after page refresh.
+- Present expiry countdowns and periodically refresh capacity information in the React UI.
+- Route API requests through Nginx to three ASP.NET Core replicas.
+- Use PostgreSQL transactions and row-level locks to protect seat allocation.
+- Persist database data through container restarts using a named Docker volume.
 
 ## Technology stack
 
-  Area                            Technology
-  ------------------------------- ------------------------
-  Backend API                     ASP.NET Core / .NET 10
-  Frontend                        React 18, TypeScript
-  Frontend build                  Vite
-  Database                        PostgreSQL 16
-  Data access                     Npgsql
-  Reverse proxy / load balancer   Nginx
-  Containers                      Docker, Docker Compose
-  API and QA tests                Python 3
-  Browser tests                   Playwright
+| Layer | Technology |
+| --- | --- |
+| Frontend | React 18, TypeScript, Vite |
+| Backend | ASP.NET Core (.NET 10), C#, Npgsql |
+| Database | PostgreSQL 16 |
+| Edge gateway | Nginx (static frontend, `/api/` proxy and request limiting) |
+| Orchestration | Docker Compose |
+| Verification utilities | Python tests; optional Playwright and k6 tooling |
 
-## Architecture
+## Architecture and load balancing
 
-``` text
-                    Browser / Client
-                           |
-                           v
-                  Nginx Gateway :3000
-                  /api routing + limits
-                           |
-                 least_conn load balancing
-                    /      |      \
-                   v       v       v
-              backend  backend2  backend3
-               .NET      .NET      .NET
-                   \       |       /
-                    \      |      /
-                           v
-                    PostgreSQL 16
-                    Docker volume
+The Docker Compose deployment runs **one Nginx gateway**, **three ASP.NET Core API replicas**, and **one persistent PostgreSQL database**. The frontend and reverse proxy share the Nginx container; there is no separate load-balancer appliance or service.
+
+### Request flow
+
+```mermaid
+flowchart TB
+    U[Parent / School Admin<br/>Browser] -->|HTTP :3000| N[Nginx Gateway<br/>React static assets + /api proxy]
+    N -->|/ HTML, JS, CSS| UI[React SPA files]
+    N -->|/api/* requests<br/>least_conn| B1[backend<br/>ASP.NET Core :8080]
+    N -->|/api/* requests<br/>least_conn| B2[backend2<br/>ASP.NET Core :8080]
+    N -->|/api/* requests<br/>least_conn| B3[backend3<br/>ASP.NET Core :8080]
+    B1 --> DB[(PostgreSQL 16<br/>Shared database)]
+    B2 --> DB
+    B3 --> DB
+    DB --- V[(Docker named volume<br/>admissions_data)]
 ```
 
--   The frontend is served by Nginx on the host's configured frontend
-    port (default `3000`).
--   Requests beginning with `/api/` are proxied to the backend replicas.
-    Nginx removes the `/api` prefix before forwarding the request.
--   The API replicas share one PostgreSQL database.
--   The database is the source of truth for seat allocation and hold
-    state.
--   The database port is **not published to the host by default**. This
-    keeps PostgreSQL accessible to the Compose services without exposing
-    it on the host network.
-
-The three API replicas and the single Nginx gateway do not make the
-whole system highly available: PostgreSQL and the gateway remain single
-points of failure.
-
-## Prerequisites
-
-Install:
-
--   Docker Desktop (macOS/Windows) or Docker Engine with Docker Compose
-    v2 (Linux).
--   Node.js 22 or a compatible Node.js release, with npm.
--   Python 3.10+ (Python 3.12 is used by the optional Compose QA
-    service).
--   Git.
-
-Check the tools:
-
-``` bash
-docker --version
-docker compose version
-node --version
-npm --version
-python3 --version
+```text
+                        Browser / Client
+                       http://localhost:3000
+                               |
+                               v
+                +-----------------------------+
+                | NGINX GATEWAY (frontend)    |
+                | React static files          |
+                | /api/* reverse proxy        |
+                | IP-based mutation rate limit|
+                | least_conn load balancing   |
+                +--------------+--------------+
+                               |
+                  +------------+------------+
+                  |            |            |
+                  v            v            v
+            +-----------+ +-----------+ +-----------+
+            | backend   | | backend2  | | backend3  |
+            | .NET :8080| | .NET :8080| | .NET :8080|
+            +-----+-----+ +-----+-----+ +-----+-----+
+                  |            |            |
+                  +------------+------------+
+                               |
+                               v
+                     +-----------------+
+                     | PostgreSQL 16   |
+                     | Shared state    |
+                     +--------+--------+
+                              |
+                     admissions_data volume
 ```
 
-The first Docker build needs network access to download the .NET and
-Node dependencies/base images.
+| Layer | Service | Host exposure | Responsibility |
+| --- | --- | --- | --- |
+| Entry point | `frontend` (Nginx) | `localhost:3000` by default | Serves React, rate-limits mutations, forwards `/api/` |
+| API replica 1 | `backend` | `127.0.0.1:8080` by default | REST API; direct host access is available for diagnostics |
+| API replica 2 | `backend2` | Internal Docker network only | Handles proxied API requests |
+| API replica 3 | `backend3` | Internal Docker network only | Handles proxied API requests |
+| Database | `db` (PostgreSQL 16) | Internal Docker network only | Authoritative admission, hold and seat data |
 
-## Local setup
+**Request example:** `GET http://localhost:3000/api/classes` arrives at Nginx; the `proxy_pass http://admission_cluster/` directive removes `/api/`, then sends `GET /classes` to one of the three backend instances. All three use the same PostgreSQL service (`db:5432`). Visiting `http://127.0.0.1:8080/classes` reaches the first API directly and **bypasses** Nginx rate limiting and load balancing.
 
-Run all commands from the repository root (`School-Admission-System/`).
+### Nginx upstream configuration (from `frontend/nginx.conf`)
 
-### 1. Create the environment file
+```nginx
+upstream admission_cluster {
+    least_conn;
+    server backend:8080 max_fails=2 fail_timeout=10s;
+    server backend2:8080 max_fails=2 fail_timeout=10s;
+    server backend3:8080 max_fails=2 fail_timeout=10s;
+}
 
-The repository includes `.env.example`. Copy it to `.env`:
-
-``` bash
-cp .env.example .env
+location /api/ {
+    limit_req zone=admission_mutations burst=20 nodelay;
+    limit_req_status 429;
+    proxy_pass http://admission_cluster/;
+    proxy_http_version 1.1;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    proxy_next_upstream error timeout http_502 http_503;
+    proxy_next_upstream_tries 3;
+}
 ```
 
-On Windows PowerShell:
+This is an **excerpt**, not a replacement for the full configuration (which also defines the rate-limit zone, error formatting and forwarded headers).
 
-``` powershell
-Copy-Item .env.example .env
+**Why `least_conn`?** Nginx normally selects an upstream with the fewest active connections (accounting for configured weights). It can help when API request durations vary. It **does not guarantee** that exactly one third of requests go to each replica, nor does it guarantee lower latency or greater total throughput without measurement.
+
+**Failure handling:** `max_fails=2 fail_timeout=10s` enables passive failure tracking. If Nginx sees the configured number of qualifying unsuccessful upstream attempts within the window, it can temporarily avoid the affected peer. This is not an active health-probe system. With `proxy_next_upstream`, an unsuccessful attempt can be sent to another peer **only if Nginx has not already sent the request to that peer in a way that prevents safe retry**; do not assume mutation requests are replayed after being sent. For `POST` and `DELETE`, inspect the actual hold state before a manual retry if the result is uncertain.
+
+### Why the shared database matters
+
+Nginx balances **HTTP requests**, not admission seats. Each backend is a separate ASP.NET Core process, so an in-memory counter would not keep reservations consistent across replicas. PostgreSQL is the shared source of truth; the application uses transactions and row-level locking to coordinate competing holds. The intended invariant is:
+
+```text
+active HELD seats + CONFIRMED seats <= totalSeats
 ```
 
-Open `.env` and set a unique local database password in
-`POSTGRES_PASSWORD`. Do not commit `.env`.
+For example, if a class has one seat left and two simultaneous hold requests reach different replicas, the database transaction/locking behavior must allow at most one successful reservation. This is an **implementation requirement**, not proof of a passing concurrency test; verify with the supplied concurrency tests.
 
-### 2. Generate npm lockfiles if they are missing
+### Rate limiting and overload protection
 
-The Docker frontend build uses `npm ci`, which requires
-`frontend/package-lock.json`. The Playwright test setup also needs
-`tests/package-lock.json`.
+The Nginx configuration defines `10r/s` per observed client IP for selected mutation endpoints with `burst=20 nodelay`. The configured routes are class creation, seat hold, confirmation and cancellation. Requests exceeding the limit receive HTTP **429** with a JSON error body and `Retry-After: 1`. Ordinary GET requests are not part of this mutation-specific gateway limit. Since different users may share a NAT/public IP, they may also share the same rate-limit bucket. Each API process additionally has its own process-local concurrency limiter; the limit is **not globally shared** across replicas.
 
-If either lockfile is missing, generate it:
+### Verify the load balancer (Windows PowerShell)
 
-``` bash
-cd frontend
-npm install --package-lock-only --ignore-scripts
-cd ../tests
-npm install --package-lock-only --ignore-scripts
-cd ..
+Run these commands from the repository root **after the frontend startup issue has been fixed**:
+
+```powershell
+# All five services should be Up; the database should be healthy.
+docker compose ps
+
+# Check the actual Nginx upstream and proxy directives.
+docker compose exec frontend nginx -T
+
+# Verify that the gateway can reach at least one API instance.
+curl.exe -i http://localhost:3000/api/readyz
+curl.exe -i http://localhost:3000/api/classes
+
+# Confirm that all three API services exist.
+docker compose ps backend backend2 backend3
 ```
 
-Commit the generated lockfiles to Git after reviewing them. Do not
-replace `npm ci` with an unpinned install in the Dockerfile.
+A `200` from the gateway demonstrates a working request path but **does not prove traffic distribution across three replicas**. For that, inspect instance-level request telemetry or temporarily add a diagnostic response header identifying the serving replica in a non-production environment; then send multiple gateway requests and confirm responses originate from multiple replicas.
 
-### 3. Install dependencies and build the frontend locally (optional)
+To test a **single replica outage**, use the following commands on a disposable development instance. The second command deliberately stops `backend2`, so do not run this during a real admission session:
 
-``` bash
-cd frontend
-npm ci
-npm run build
-cd ..
-```
+```powershell
+# Simulate one failed replica.
+docker compose stop backend2
 
-Install the Playwright test dependencies when you intend to run browser
-tests:
+# Nginx should still be able to serve API requests from the other replicas.
+curl.exe -i http://localhost:3000/api/readyz
+curl.exe -i http://localhost:3000/api/classes
 
-``` bash
-cd tests
-npm ci
-cd ..
-```
-
-### 4. Validate and start Docker Compose
-
-``` bash
-docker compose config --quiet
-docker compose up --build -d
-```
-
-Check the containers:
-
-``` bash
+# Restore the replica.
+docker compose start backend2
 docker compose ps
 ```
 
-Expected services:
+For automated fault-injection checks, review `tests/failover_test.py` before running it. A single successful request during an outage does not establish comprehensive failover behavior; check repeated requests and error rates.
 
--   `db`
--   `backend`
--   `backend2`
--   `backend3`
--   `frontend`
+### Scope and limitations
 
-Wait until PostgreSQL reports healthy and the API replicas have started.
+- **Load balancing is not full high availability.** Nginx and PostgreSQL are single points of failure in this Compose setup.
+- The three API replicas share **one Docker host and one database**; a host-wide failure stops the deployment.
+- Nginx's passive failure handling does not replace end-to-end health checking, monitoring or a production failover design.
+- An API `200` or a successful Docker build alone does not demonstrate fairness, throughput, concurrency correctness or a successful recovery test.
 
-### 5. View logs
+See [load and HA plan](docs/LOAD_AND_HA_PLAN.md), [architecture decisions](docs/ARCHITECTURE_DECISIONS.md), and [operations runbook](docs/OPERATIONS_RUNBOOK.md).
 
-``` bash
-docker compose logs --tail=100
+## Quick start
+
+### Prerequisites
+
+- Docker Desktop with Linux containers enabled (Windows/macOS), or Docker Engine and Docker Compose v2 (Linux).
+- Git to clone the repository.
+- Internet connectivity for initial Docker image and package downloads.
+
+**Node.js, .NET SDK, and PostgreSQL do not need to be installed on the host** to run the application through Docker Compose. Python, Node.js, Playwright, or k6 are only needed for tests run directly on the host.
+
+### 1. Clone the project
+
+```powershell
+git clone https://github.com/mdtawhidmostafa/School-Admission-System.git
+cd School-Admission-System
 ```
 
-Follow logs continuously:
+### 2. Configure the environment
 
-``` bash
-docker compose logs -f
+Create a file called `.env` in the repository root. If the checkout includes `.env.example`, copy it first; otherwise create `.env` manually with these development-only values:
+
+```dotenv
+POSTGRES_DB=admissions
+POSTGRES_USER=admissions
+POSTGRES_PASSWORD=REPLACE_WITH_A_UNIQUE_LOCAL_PASSWORD
+AUTH_MODE=assignment
+ADMIN_API_KEY=
+HOLD_DURATION_SECONDS=600
+FRONTEND_PORT=3000
+BACKEND_PORT=8080
 ```
 
-Only the database:
+Replace the placeholder password before starting. **Do not commit `.env` or copy credentials into issues, logs, or screenshots.** The supplied ZIP snapshot contained `.env` but did **not** contain `.env.example` or `.gitignore`; check your actual Git checkout and add a sanitized `.env.example` and appropriate `.gitignore` before submission.
 
-``` bash
-docker compose logs -f db
+### 3. Validate and start
+
+```powershell
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
 ```
 
-Only API replicas:
+Expected services: `db`, `backend`, `backend2`, `backend3`, and `frontend`. The database should become healthy; the frontend should remain up rather than repeatedly restarting.
 
-``` bash
-docker compose logs -f backend backend2 backend3
+### 4. Open the application
+
+| Service | Local address | Notes |
+| --- | --- | --- |
+| Frontend | http://localhost:3000 | School admin and student/guardian UI |
+| Gateway API | http://localhost:3000/api/classes | Requests distributed across API replicas |
+| Gateway readiness | http://localhost:3000/api/readyz | Backend readiness through Nginx |
+| Direct backend | http://localhost:8080 | First backend instance only |
+| Direct readiness | http://localhost:8080/readyz | Expected response: `{"status":"ready"}` |
+| Database | `db:5432` | Internal Docker network; not host-exposed by default |
+
+**PowerShell smoke checks:**
+
+```powershell
+curl.exe -i http://localhost:8080/readyz
+curl.exe -i http://localhost:3000/
+curl.exe -i http://localhost:3000/api/classes
 ```
 
-## Accessing the application
+The `readyz` endpoint should return HTTP 200 with `{"status":"ready"}` once the database is available.
 
-Default local URLs:
+## User workflow
 
-  ------------------------------------------------------------------------------------
-  Service                 URL                                  Purpose
-  ----------------------- ------------------------------------ -----------------------
-  Frontend                <http://localhost:3000>              React application
+1. **Administrator:** Create an admission class such as `Class 6 - Morning Shift`, specifying its seat capacity.
+2. **Student/guardian:** Enter a 17-digit birth registration number in the UI and view available classes.
+3. **Reserve:** Select a class to create a temporary seat hold (`HELD`).
+4. **Confirm or cancel:** Confirm simulated fee payment before the expiry deadline (`CONFIRMED`), or cancel an active reservation (`CANCELLED`).
+5. **Expire:** If not confirmed in time, the reservation becomes `EXPIRED` and its seat returns to available capacity.
 
-  Nginx API gateway       <http://localhost:3000/api>          API through the gateway
+Default hold lifetime: **600 seconds (10 minutes)** via `HOLD_DURATION_SECONDS`.
 
-  Direct API replica      <http://localhost:8080>              Direct access to
-                                                               `backend`
+| State | Meaning |
+| --- | --- |
+| `HELD` | Seat reserved until the expiry deadline |
+| `CONFIRMED` | Admission confirmed; counts against capacity |
+| `EXPIRED` | Reservation deadline passed |
+| `CANCELLED` | Active hold cancelled |
 
-  Gateway readiness       <http://localhost:3000/api/readyz>   API readiness through
-                                                               Nginx
+A student cannot maintain more than one active or confirmed admission for the same class. Confirmation of an already confirmed hold is designed to be idempotent. Actual money is **not** transferred: the confirmation action simulates successful payment as permitted by the assignment.
 
-  Direct API readiness    <http://localhost:8080/readyz>       API readiness without
-                                                               Nginx
-  ------------------------------------------------------------------------------------
+## API reference
 
-Quick checks:
+Use `http://localhost:8080` for direct backend access or prefix every route with `/api` on `http://localhost:3000` to access it through Nginx.
 
-``` bash
-curl -i http://localhost:3000/api/readyz
-curl -i http://localhost:8080/readyz
-curl -i http://localhost:3000/api/classes
+| Method | Backend route | Purpose |
+| --- | --- | --- |
+| `GET` | `/healthz` | Liveness |
+| `GET` | `/readyz` | Readiness and database check |
+| `POST` | `/classes` | Create a class |
+| `GET` | `/classes` | List classes and seat counts |
+| `GET` | `/classes/{classId}` | Get class details |
+| `POST` | `/classes/{classId}/holds` | Reserve a seat |
+| `GET` | `/holds/{holdId}` | Get hold status |
+| `POST` | `/holds/{holdId}/confirm` | Confirm a hold |
+| `DELETE` | `/holds/{holdId}` | Cancel a hold |
+| `GET` | `/me/holds` | List holds for a student |
+| `GET` | `/admin/auth-check` | Check administrator authorization configuration |
+
+Student-specific calls use the header `X-Student-Id` with exactly **17 digits**. These headers identify the assignment's demo student but do not authenticate a real person.
+
+### Example: create and list classes (PowerShell)
+
+```powershell
+$body = @{ name = 'Class 6 - Morning Shift'; totalSeats = 120 } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/classes' -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'http://localhost:8080/classes'
 ```
 
-A successful readiness response is HTTP `200` with:
+When `AUTH_MODE=protected`, the class-creation request also requires a valid `X-Admin-Key` header. The default `assignment` mode intentionally follows the no-login assignment workflow.
 
-``` json
-{"status":"ready"}
+### Example: reserve, inspect, confirm
+
+Replace `<CLASS_ID>` and `<HOLD_ID>` with values returned by the API:
+
+```powershell
+$studentHeaders = @{ 'X-Student-Id' = '20152691234567890' }
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/classes/<CLASS_ID>/holds' -Headers $studentHeaders
+Invoke-RestMethod -Uri 'http://localhost:8080/holds/<HOLD_ID>'
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/holds/<HOLD_ID>/confirm' -Headers $studentHeaders
+Invoke-RestMethod -Uri 'http://localhost:8080/me/holds' -Headers $studentHeaders
 ```
 
-## Database access
+Use only fictitious identifiers in development and testing.
 
-### Access PostgreSQL from the Docker container
+## Database access and persistence
 
-PostgreSQL is available to the Compose network as service `db`. Use:
-
-``` bash
+```powershell
 docker compose exec db pg_isready -U admissions -d admissions
 docker compose exec db psql -U admissions -d admissions
 ```
 
-Inside `psql`:
+Useful `psql` commands:
 
-``` sql
-\l
-\c admissions
+```sql
 \dt
-SELECT * FROM classes;
-SELECT * FROM holds;
+SELECT * FROM classes LIMIT 10;
+SELECT * FROM holds LIMIT 10;
 \q
 ```
 
-The default database name and user are `admissions`. If you changed the
-`.env` values, use those values instead.
+For pgAdmin or DBeaver access, add the following **to the `db` service** in `docker-compose.yml`:
 
-### Optional: connect with DBeaver or pgAdmin
-
-The database port is not exposed to the host by default. To use a
-desktop database client locally, add this under the `db:` service in
-`docker-compose.yml`:
-
-``` yaml
-    ports:
-      - "127.0.0.1:5432:5432"
+```yaml
+ports:
+  - "127.0.0.1:5433:5432"
 ```
 
-Then recreate only the database container:
+Then apply the Compose change and connect to `127.0.0.1:5433` using `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from `.env`. Keep the database bound to loopback, not a public interface.
 
-``` bash
-docker compose up -d --force-recreate db
-```
-
-Use these connection settings in DBeaver/pgAdmin:
-
-  Setting    Value
-  ---------- -------------------------------------------------
-  Host       `localhost`
-  Port       `5432`
-  Database   Value of `POSTGRES_DB` (default `admissions`)
-  Username   Value of `POSTGRES_USER` (default `admissions`)
-  Password   Value of `POSTGRES_PASSWORD` in `.env`
-
-Binding to `127.0.0.1` keeps the database port local to your computer.
-Do not publish PostgreSQL to a public interface for convenience.
-
-## API reference
-
-All paths below are shown relative to the Nginx gateway prefix
-`http://localhost:3000/api`. The backend itself receives the path
-without `/api`.
-
-  --------------------------------------------------------------------------------
-  Method                  Gateway endpoint                 Description
-  ----------------------- -------------------------------- -----------------------
-  `GET`                   `/api/healthz`                   Liveness check
-
-  `GET`                   `/api/readyz`                    Readiness check;
-                                                           verifies database
-                                                           connectivity
-
-  `GET`                   `/api/classes`                   List classes and seat
-                                                           counts
-
-  `POST`                  `/api/classes`                   Create a class
-
-  `GET`                   `/api/classes/{classId}`         Get class details
-
-  `POST`                  `/api/classes/{classId}/holds`   Temporarily hold a seat
-
-  `GET`                   `/api/holds/{holdId}`            Get hold details
-
-  `POST`                  `/api/holds/{holdId}/confirm`    Confirm admission
-
-  `DELETE`                `/api/holds/{holdId}`            Cancel a hold
-
-  `GET`                   `/api/me/holds`                  List holds for the
-                                                           supplied student ID
-
-  `GET`                   `/api/admin/auth-check`          Check administrator
-                                                           authorization mode/key
-  --------------------------------------------------------------------------------
-
-### Create a class
-
-``` bash
-curl -i -X POST http://localhost:3000/api/classes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Class 6 - Morning Shift",
-    "totalSeats": 10
-  }'
-```
-
-When `AUTH_MODE=protected`, include the administrator key:
-
-``` bash
--H "X-Admin-Key: YOUR_ADMIN_API_KEY"
-```
-
-### List classes
-
-``` bash
-curl -i http://localhost:3000/api/classes
-```
-
-### Hold a seat
-
-Replace `{classId}` with an ID returned by the classes endpoint. The
-assignment workflow expects `X-Student-Id` to contain exactly 17 digits.
-
-``` bash
-curl -i -X POST \
-  http://localhost:3000/api/classes/{classId}/holds \
-  -H "X-Student-Id: 20152691234567890"
-```
-
-### Get a hold
-
-``` bash
-curl -i http://localhost:3000/api/holds/{holdId}
-```
-
-### Confirm admission
-
-``` bash
-curl -i -X POST \
-  http://localhost:3000/api/holds/{holdId}/confirm \
-  -H "X-Student-Id: 20152691234567890"
-```
-
-### Cancel a hold
-
-``` bash
-curl -i -X DELETE \
-  http://localhost:3000/api/holds/{holdId} \
-  -H "X-Student-Id: 20152691234567890"
-```
-
-### List a student's holds
-
-``` bash
-curl -i http://localhost:3000/api/me/holds \
-  -H "X-Student-Id: 20152691234567890"
-```
-
-Replace `{classId}` and `{holdId}` with actual IDs returned by the API.
-Do not use the example student ID for real student records.
-
-## Admission workflow
-
-A hold moves through these states:
-
-  State         Meaning
-  ------------- -----------------------------------
-  `HELD`        A seat is temporarily reserved
-  `CONFIRMED`   Admission has been confirmed
-  `EXPIRED`     The hold's expiry time has passed
-  `CANCELLED`   The hold was cancelled
-
-The default hold duration is `600` seconds (10 minutes), controlled by
-`HOLD_DURATION_SECONDS`.
-
-The backend uses database transactions and row-level locking when
-reserving a seat. The goal is to ensure that concurrent requests cannot
-reserve more seats than the class capacity. A student may not create
-another active hold for the same class.
-
-## Rate limiting and load balancing
-
-### Nginx gateway
-
-The current Nginx configuration:
-
--   Uses the `least_conn` upstream balancing method across `backend`,
-    `backend2`, and `backend3`.
--   Applies a per-observed-client-IP limit of `10` requests per second
-    to configured mutation routes.
--   Allows a burst of `20` requests with `nodelay`.
--   Returns HTTP `429` when the gateway rate limit is exceeded.
--   Sends `Retry-After: 1` for gateway-generated rate-limit responses.
-
-The mutation routes covered by the gateway limit are class creation,
-hold creation, hold confirmation, and hold cancellation. GET requests
-are not included in this Nginx mutation limit.
-
-### Backend concurrency limiter
-
-Each ASP.NET API process also has a process-local concurrency limiter
-configured for 128 active permits and a queue of 128 requests. This is a
-resource-protection setting, not a throughput guarantee. Each replica
-has its own limiter.
-
-Because gateway rate limiting is based on the observed client IP,
-legitimate users sharing a public/NAT IP may share the same limit.
-
-## Testing and verification
-
-Run tests only against a development or disposable QA database. Do not
-run destructive or load tests against real student data.
-
-### Static source checks
-
-``` bash
-python3 tests/quality_gate.py
-```
-
-This checks source/configuration expectations. It does **not** compile
-the .NET application or prove runtime behavior.
-
-### API integration and concurrency tests
-
-The Compose QA profile runs the API integration test against the
-internal backend service:
-
-``` bash
-docker compose --profile qa run --rm qa
-```
-
-Alternatively, with the stack already running and in the default
-assignment mode:
-
-``` bash
-API_URL=http://localhost:8080 python3 tests/integration_test.py
-```
-
-The integration suite covers API contracts, concurrent seat holds, hold
-lifecycle, ownership checks, validation, structured errors, and optional
-expiry testing.
-
-For an expiry test, use a separate disposable stack and configure
-matching values for `HOLD_DURATION_SECONDS` and `TEST_HOLD_SECONDS` (the
-test script accepts values from 1 to 90 seconds). Do not change the hold
-duration on a live admissions database just to run this test.
-
-### Load smoke test
-
-Direct backend test:
-
-``` bash
-API_URL=http://localhost:8080 USERS=100 WORKERS=25 python3 tests/load_smoke.py
-```
-
-Through the Nginx gateway:
-
-``` bash
-API_URL=http://localhost:3000/api USERS=100 WORKERS=25 python3 tests/load_smoke.py
-```
-
-The script reports request throughput, p95 latency, and HTTP status
-counts, and checks that held plus confirmed seats do not exceed
-capacity. It is a bounded smoke benchmark, **not** a production capacity
-certificate. Results depend on the machine and test conditions.
-
-### Load-balancer failover test
-
-``` bash
-python3 tests/failover_test.py
-```
-
-This test stops `backend2`, probes `GET /api/classes` through Nginx, and
-starts `backend2` again in a `finally` block. It tests availability
-during one API replica outage; it does not prove full high availability.
-
-### Other QA utilities
-
-The repository also includes additional scripts for gateway policy,
-persistence, backup/restore drills, race-boundary checks, and browser
-E2E testing. Read each script and its prerequisites before running it.
-Prefer `tests/run_isolated_qa.py` for the isolated QA workflow described
-in the project QA documentation.
-
-## Docker commands
-
-Run from the project root.
-
-  Task                                 Command
-  ------------------------------------ ----------------------------------------
-  Start services                       `docker compose up -d`
-  Build and start                      `docker compose up --build -d`
-  Stop services, keep containers       `docker compose stop`
-  Start stopped services               `docker compose start`
-  Stop and remove containers/network   `docker compose down`
-  Show status                          `docker compose ps`
-  Follow all logs                      `docker compose logs -f`
-  Follow database logs                 `docker compose logs -f db`
-  Rebuild one service                  `docker compose up -d --build backend`
-
-**Database warning:** `docker compose down -v` deletes the Compose named
-volume and can permanently remove local PostgreSQL data. Do not use it
-unless you intentionally want to delete the database volume.
+The named volume `admissions_data` persists across a normal `docker compose down` followed by `docker compose up -d`. **Never run `docker compose down -v` unless intentionally deleting the database.**
 
 ## Configuration
 
-The root `.env.example` documents the supported Compose settings:
+| Variable | Development default | Purpose |
+| --- | --- | --- |
+| `POSTGRES_DB` | `admissions` | Database name |
+| `POSTGRES_USER` | `admissions` | Database username |
+| `POSTGRES_PASSWORD` | Required | Database password (use a unique local value) |
+| `HOLD_DURATION_SECONDS` | `600` | Hold expiry duration |
+| `AUTH_MODE` | `assignment` | Assignment workflow or optional `protected` mode |
+| `ADMIN_API_KEY` | Empty | Required for admin class creation in `protected` mode |
+| `FRONTEND_PORT` | `3000` | Host frontend port |
+| `BACKEND_PORT` | `8080` | Host direct backend port |
+| `TEST_HOLD_SECONDS` | `0` | Optional isolated QA expiry test setting |
 
-  -------------------------------------------------------------------------
-  Variable                  Default                 Purpose
-  ------------------------- ----------------------- -----------------------
-  `POSTGRES_DB`             `admissions`            PostgreSQL database
-                                                    name
+`API_BASE_URL` is configured as `/api` for the frontend service in Compose; Nginx forwards those requests internally. The backend `DATABASE_URL` is assembled by Compose using the database settings.
 
-  `POSTGRES_USER`           `admissions`            PostgreSQL username
+## Additional concurrency and gateway notes
 
-  `POSTGRES_PASSWORD`       Set by you              Required database
-                                                    password
+- PostgreSQL transactions and row-level locking serialize competing seat mutations for a given class; active holds plus confirmed admissions must never exceed `totalSeats`.
+- The gateway currently uses `least_conn` across three backend replicas.
+- Mutation endpoints are limited by observed client IP (10 requests/second with a burst of 20); overloaded clients may receive HTTP 429 and `Retry-After: 1`.
+- The backend also applies a per-process concurrency limiter. This does not guarantee a particular throughput or latency.
+- Shared public/NAT IPs may cause unrelated users to share the same gateway limit.
+- Some failures can leave the outcome of a submitted mutation uncertain; inspect current holds before blindly retrying.
+- A single Nginx gateway and a single PostgreSQL instance are **not a high-availability architecture**.
 
-  `AUTH_MODE`               `assignment`            `assignment` or
-                                                    `protected`
+See [architecture decisions](docs/ARCHITECTURE_DECISIONS.md), [load and HA plan](docs/LOAD_AND_HA_PLAN.md), and [operations runbook](docs/OPERATIONS_RUNBOOK.md).
 
-  `ADMIN_API_KEY`           Empty                   Required in protected
-                                                    mode; at least 32 UTF-8
-                                                    bytes
+## Testing
 
-  `HOLD_DURATION_SECONDS`   `600`                   Hold duration, 1--86400
-                                                    seconds
+Only run mutating, concurrency, and load tests against a disposable test database. The repository provides test scripts, but their existence does **not** establish that they passed on your machine.
 
-  `TEST_HOLD_SECONDS`       `0`                     Optional expiry-test
-                                                    duration; use a
-                                                    separate QA stack
+```powershell
+# Source/configuration checks (requires Python installed locally)
+python tests/quality_gate.py
 
-  `FRONTEND_PORT`           `3000`                  Host port for
-                                                    frontend/Nginx
+# API integration suite inside Docker, on the currently configured database
+# Prefer a disposable QA project/database for this mutating test.
+docker compose --profile qa run --rm qa
+```
 
-  `BACKEND_PORT`            `8080`                  Loopback host port for
-                                                    the first API replica
-  -------------------------------------------------------------------------
+Additional tests are available under `tests/`, including integration/concurrency, gateway policy, failover, persistence, load smoke, browser E2E, and isolated QA utilities. Consult [QA test matrix](docs/QA_TEST_MATRIX.md), [QA report](docs/QA_REPORT.md), and [submission gate](docs/SUBMISSION_GATE.md).
 
-`DATABASE_URL` is assembled for the API containers by Docker Compose
-from the PostgreSQL settings. Do not put production credentials in
-source files.
-
-## Security notes
-
--   `AUTH_MODE=assignment` preserves the assignment workflow and does
-    not provide real student identity verification.
--   `X-Student-Id` is an identifier supplied by the client; by itself it
-    is **not authentication**. Do not use this mode for real public
-    admissions.
--   `AUTH_MODE=protected` optionally requires `X-Admin-Key` for class
-    creation. The key must contain at least 32 UTF-8 bytes.
--   The optional admin API key is not a replacement for user
-    authentication, verified student identity, RBAC, or MFA.
--   Keep `.env`, backups, database dumps, and real student data out of
-    Git.
--   Use HTTPS, managed secrets, restricted database access, monitoring,
-    backups, and a verified identity provider before any real production
-    deployment.
--   A single PostgreSQL primary and a single Nginx gateway remain single
-    points of failure.
+**Evidence note:** The supplied ZIP includes historical QA documentation with unresolved blockers. The later Windows log shows that Docker images built successfully and the direct backend returned HTTP 200 on `/readyz`, but the frontend repeatedly exited during startup. Full end-to-end, concurrency, failover, and persistence results have not been established by those logs. Update QA evidence after running the checks.
 
 ## Troubleshooting
 
-  ----------------------------------------------------------------------------------------------
-  Symptom                             Checks
-  ----------------------------------- ----------------------------------------------------------
-  Compose says `POSTGRES_PASSWORD` is Create `.env` from `.env.example` and set a non-empty
-  required                            password
+### Frontend repeatedly restarts with exit code 127
 
-  Frontend Docker build fails at      Generate and commit `frontend/package-lock.json`
-  `npm ci`                            
+Observed in the provided Windows startup logs:
 
-  Playwright install/test fails       Generate `tests/package-lock.json`, run `npm ci` in
-                                      `tests`, and install the required Playwright browser
+```text
+/docker-entrypoint.sh: line 31: /docker-entrypoint.d/40-app-config.sh: not found
+```
 
-  API returns `503` on `/readyz`      Check `docker compose ps`, `docker compose logs db`,
-                                      credentials, and database health
+The `frontend/Dockerfile` copies `frontend/entrypoint.sh` into the Nginx initialization directory. A likely cause on Windows is a CRLF line ending in the shell script. Normalize it to Unix LF **inside the Docker build** by replacing its existing chmod instruction with:
 
-  Gateway returns `502`               Check all three backend containers and
-                                      `docker compose logs frontend backend backend2 backend3`
+```dockerfile
+RUN sed -i 's/\r$//' /docker-entrypoint.d/40-app-config.sh \
+    && chmod +x /docker-entrypoint.d/40-app-config.sh
+```
 
-  API returns `429`                   Respect `Retry-After`; reduce request rate and check
-                                      whether users share a NAT/public IP
+Then rebuild only the frontend:
 
-  Hold returns `409`                  Check class capacity, existing active holds, and the hold
-                                      state
+```powershell
+docker compose build --no-cache frontend
+docker compose up -d --no-deps --force-recreate frontend
+docker compose ps
+docker compose logs --tail=50 frontend
+```
 
-  Confirm/cancel returns `403`        The supplied `X-Student-Id` does not match the hold owner
+If it still fails, inspect the container logs and check that the entrypoint is executable and its interpreter exists. This fix was proposed from log evidence; it is **not yet verified** on the user's runtime.
 
-  Port is already in use              Change `FRONTEND_PORT` or `BACKEND_PORT` in `.env`
+### Other common issues
 
-  Data appears missing after restart  Confirm the `admissions_data` volume is present; do not
-                                      run `down -v`
-  ----------------------------------------------------------------------------------------------
+| Symptom | Check |
+| --- | --- |
+| `localhost:3000` refuses connection | `docker compose ps -a`; frontend logs and published port |
+| `localhost:8080/readyz` fails | Backend logs, PostgreSQL health and connection settings |
+| Nginx returns 502 | Check `backend`, `backend2`, and `backend3` logs |
+| API returns 429 | Slow down mutations; honor `Retry-After` |
+| Hold returns 409 | Capacity, duplicate reservation, or state conflict |
+| Confirm/cancel returns 403 | Check `X-Student-Id` ownership |
+| `npm ci` fails | Check corresponding `package-lock.json` validity |
+| Port conflict | Change `FRONTEND_PORT` / `BACKEND_PORT` in `.env` |
+| Data seems missing | Check current Compose project and named database volume |
 
-## Project structure
+## Useful Docker commands
 
-``` text
+```powershell
+docker compose ps                      # Service status
+docker compose logs -f frontend       # Follow frontend logs
+docker compose logs --tail=100 db     # Database logs
+docker compose stop                   # Stop, keep containers and volume
+docker compose start                  # Restart stopped containers
+docker compose down                   # Remove containers/network, keep DB volume
+docker compose up -d                  # Recreate/start as needed
+```
+
+## Repository structure
+
+```text
 School-Admission-System/
-├── backend/
-│   ├── Dockerfile
-│   └── SchoolAdmission.Api/
-├── frontend/
-│   ├── src/
-│   ├── Dockerfile
-│   ├── nginx.conf
-│   └── package.json
-├── tests/
-│   ├── integration_test.py
-│   ├── load_smoke.py
-│   ├── failover_test.py
-│   └── ...
-├── deploy/
-├── docs/
-├── ops/
-├── scripts/
+├── backend/                  # ASP.NET Core API and Dockerfile
+├── frontend/                 # React UI, Vite, Nginx config, startup script
+├── tests/                    # API, concurrency, load and browser testing utilities
+├── docs/                     # Assumptions, decisions, QA and operational documentation
+├── deploy/                   # Alternative deployment configuration
+├── ops/                      # Backup/restore support
+├── scripts/                  # Developer setup utilities
 ├── docker-compose.yml
-├── .env.example
-├── .gitignore
 └── README.md
 ```
 
-## Contributing
+## Assignment documentation
 
-1.  Create a feature branch.
-2.  Keep changes focused and document configuration changes.
-3.  Run relevant static, integration, concurrency, and browser tests.
-4.  Review generated lockfile changes.
-5.  Never commit secrets, local environment files, database dumps, or
-    real student data.
+- [Assumptions and rationale](docs/ASSUMPTIONS.md)
+- [AI usage disclosure](docs/AI_USAGE.md)
+- [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md)
+- [Reviewer guide](docs/REVIEWER_GUIDE.md)
+- [QA report](docs/QA_REPORT.md)
+- [Submission gate](docs/SUBMISSION_GATE.md)
 
-## License
+## Security and release notes
 
-No license is specified in this repository. Add an appropriate `LICENSE`
-file before publishing or redistributing the project.
+`AUTH_MODE=assignment` is deliberately a demonstration workflow: a client-provided `X-Student-Id` is **not** verified identity or secure authentication. The optional administrator key does not replace user authentication and role-based access control. Do not deploy for real admissions without security design, migrations, secrets management, HTTPS, backup/recovery verification, monitoring, and production testing.
+
+No license was identified in the supplied ZIP snapshot. Unless a license is explicitly added, do not assume third parties have permission to reuse or redistribute the source.
