@@ -1,0 +1,53 @@
+{
+  "version": "v1",
+  "executed_on": "2026-11-10",
+  "source": "v13",
+  "checks": [
+    {
+      "label": "Offline Python unit and Nginx stub gateway tests",
+      "command": "python -m unittest discover -s tests -p test_*.py -v",
+      "exit_code": 0,
+      "status": "PASS",
+      "output": "\ntest_live_gateway_limit (test_nginx_live_policy.GatewayRuntime.test_live_gateway_limit) ... ok\ntest_exact_documented_routes (test_quality_unit.RepositoryTests.test_exact_documented_routes) ... ok\ntest_isolated_qa_name (test_quality_unit.RepositoryTests.test_isolated_qa_name) ... ok\ntest_named_volume (test_quality_unit.RepositoryTests.test_named_volume) ... ok\ntest_no_hardcoded_db_password (test_quality_unit.RepositoryTests.test_no_hardcoded_db_password) ... ok\ntest_backup_drill_guard (test_v12_source.V12SourceTests.test_backup_drill_guard) ... ok\ntest_ci_executed_race (test_v12_source.V12SourceTests.test_ci_executed_race) ... ok\ntest_lockfiles_are_real_and_present (test_v12_source.V12SourceTests.test_lockfiles_are_real_and_present) ... skipped 'Release blocker: missing frontend/package-lock.json'\ntest_no_sensitive_dotenv_in_archive (test_v12_source.V12SourceTests.test_no_sensitive_dotenv_in_archive) ... ok\ntest_schema_checksum (test_v12_source.V12SourceTests.test_schema_checksum) ... ok\ntest_split_frontend_network_failure (test_v12_source.V12SourceTests.test_split_frontend_network_failure) ... ok\ntest_telemetry_import (test_v12_source.V12SourceTests.test_telemetry_import) ... ok\ntest_gateway_errors_are_json (test_v13_gateway.GatewayPolicy.test_gateway_errors_are_json) ... ok\ntest_mutation_coverage (test_v13_gateway.GatewayPolicy.test_mutation_coverage) ... ok\ntest_no_lockfile_fabrication (test_v13_gateway.GatewayPolicy.test_no_lockfile_fabrication) ... ok\ntest_retry_safety (test_v13_gateway.GatewayPolicy.test_retry_safety) ... ok\ntest_admin_key_in_dedicated_helper (test_v14_maintainability.CleanupRegressions.test_admin_key_in_dedicated_helper) ... ok\ntest_frontend_single_persistence_hook (test_v14_maintainability.CleanupRegressions.test_frontend_single_persistence_hook) ... ok\ntest_history_and_classes_independent (test_v14_maintainability.CleanupRegressions.test_history_and_classes_independent) ... ok\ntest_single_transition_implementation (test_v14_maintainability.CleanupRegressions.test_single_transition_implementation) ... ok\n\n----------------------------------------------------------------------\nRan 20 tests in 0.572s\n\nOK (skipped=1)\n"
+    },
+    {
+      "label": "API source contract",
+      "command": "python tests/static_contract_check.py",
+      "exit_code": 0,
+      "status": "PASS",
+      "output": "PASS static .NET10/API/compose checks (does not prove runtime behavior)\n\n"
+    },
+    {
+      "label": "Source quality gate",
+      "command": "python tests/quality_gate.py",
+      "exit_code": 0,
+      "status": "PASS",
+      "output": "PASS source-structure checks (runtime is NOT validated)\n\n"
+    },
+    {
+      "label": "Python compile",
+      "command": "python -m compileall -q tests",
+      "exit_code": 0,
+      "status": "PASS",
+      "output": "\n"
+    },
+    {
+      "label": "TypeScript transpilation syntax only",
+      "command": "node -e const fs=require('fs');const ts=require('/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript');let errs=0;for(const f of ['frontend/src/main.tsx','frontend/src/hooks/useAdmissionData.ts','frontend/src/hooks/useSavedField.ts',...fs.readdirSync('frontend/src/components').map(x=>'frontend/src/components/'+x)]){const result=ts.transpileModule(fs.readFileSync(f,'utf8'),{fileName:f,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020},reportDiagnostics:true}); const diagnostics=(result.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error);console.log(f,diagnostics.length?'FAIL':'PASS');for(const d of diagnostics){console.log(ts.flattenDiagnosticMessageText(d.messageText,'\\n'));errs++}}process.exitCode=errs?1:0;",
+      "exit_code": 0,
+      "status": "PASS",
+      "output": "frontend/src/main.tsx PASS\nfrontend/src/hooks/useAdmissionData.ts PASS\nfrontend/src/hooks/useSavedField.ts PASS\nfrontend/src/components/AdminClassForm.tsx PASS\nfrontend/src/components/ApplicationsPanel.tsx PASS\nfrontend/src/components/ClassCard.tsx PASS\n\n"
+    }
+  ],
+  "actual_runtime_tests": {
+    "dotnet_build": "NOT RUN: .NET unavailable",
+    "docker_build": "NOT RUN: Docker unavailable",
+    "postgres_concurrency": "NOT RUN: Docker/.NET unavailable",
+    "full_typescript_typecheck": "NOT RUN: npm dependencies missing"
+  },
+  "lockfiles": {
+    "status": "BLOCKED",
+    "present": false
+  },
+  "all_executed_checks_pass": true
+}

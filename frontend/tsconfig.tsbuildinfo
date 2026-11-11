@@ -1,0 +1,1 @@
+{"root":["./src/main.tsx","./src/api/client.ts","./src/components/adminclassform.tsx","./src/components/applicationspanel.tsx","./src/components/classcard.tsx","./src/hooks/useadmissiondata.ts","./src/hooks/usesavedfield.ts"],"version":"5.6.3"}

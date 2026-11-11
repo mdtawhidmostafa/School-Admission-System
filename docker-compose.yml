@@ -1,0 +1,73 @@
+# Default: three stateless ASP.NET APIs + Nginx LB + persistent PostgreSQL.
+# This PostgreSQL service is Supabase-compatible, NOT the full Supabase platform.
+# For an existing Supabase Postgres, use the external database override documented in README.
+x-api: &api
+  init: true
+  build: ./backend
+  restart: unless-stopped
+  environment: &api-env
+    DATABASE_URL: "Host=db;Port=5432;Database=${POSTGRES_DB:-admissions};Username=${POSTGRES_USER:-admissions};Password=${POSTGRES_PASSWORD:?Copy .env.example to .env and set POSTGRES_PASSWORD};Maximum Pool Size=20;Timeout=5;Command Timeout=10;Application Name=admission_api"
+    HOLD_DURATION_SECONDS: ${HOLD_DURATION_SECONDS:-600}
+    AUTH_MODE: ${AUTH_MODE:-assignment}
+    ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+    ASPNETCORE_ENVIRONMENT: Production
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admissions}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env and set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-admissions}
+    volumes:
+      - admissions_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+  backend:
+    <<: *api
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
+  backend2:
+    <<: *api
+  backend3:
+    <<: *api
+  frontend:
+    init: true
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: /api
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+      - backend2
+      - backend3
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+  qa:
+    image: python:3.12-alpine
+    profiles: ["qa"]
+    working_dir: /tests
+    volumes:
+      - ./tests:/tests:ro
+    environment:
+      API_URL: http://backend:8080
+      TEST_HOLD_SECONDS: ${TEST_HOLD_SECONDS:-0}
+    depends_on:
+      - frontend
+    command: ["python", "integration_test.py"]
+volumes:
+  admissions_data:

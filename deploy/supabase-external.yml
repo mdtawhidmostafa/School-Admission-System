@@ -1,0 +1,17 @@
+# Optional: when a separately managed Supabase Postgres is already running.
+# Invoke with: docker compose -f docker-compose.yml -f deploy/supabase-external.yml up --build -d
+# Set SUPABASE_DB_HOST / SUPABASE_DB_PASSWORD in .env. Its DB must be network-reachable.
+# This option requires access to the database; it does not start the full Supabase platform.
+services:
+  db:
+    profiles: ["local-db"]
+  backend:
+    environment: &external_env
+      DATABASE_URL: "Host=${SUPABASE_DB_HOST:?Set SUPABASE_DB_HOST};Port=${SUPABASE_DB_PORT:-5432};Database=${SUPABASE_DB_NAME:-postgres};Username=${SUPABASE_DB_USER:-postgres};Password=${SUPABASE_DB_PASSWORD:?Set SUPABASE_DB_PASSWORD};Maximum Pool Size=20;Timeout=5;Command Timeout=10;SSL Mode=${SUPABASE_SSL_MODE:-Require}"
+    depends_on: []
+  backend2:
+    environment: *external_env
+    depends_on: []
+  backend3:
+    environment: *external_env
+    depends_on: []
